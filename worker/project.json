@@ -1,0 +1,9 @@
+{
+  "repos": ["YOUR-GITHUB-USERNAME/sim-project"],
+  "kloc": 8,
+  "cocomo_mode": "organic",
+  "milestones": [
+    { "name": "v1 Auth",     "start": "2026-10-01", "end": "2026-10-20" },
+    { "name": "v2 Payments", "start": "2026-10-21", "end": "2026-11-15" }
+  ]
+}

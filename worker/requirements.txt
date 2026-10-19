@@ -1,0 +1,4 @@
+requests
+scikit-learn
+supabase
+pytest
