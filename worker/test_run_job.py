@@ -54,3 +54,19 @@ def test_stale_prs_are_scoped_to_their_own_milestone():
     v1 = run_job.compute_milestone_report(d, dict(M, name="v1"), date.today())
     v2 = run_job.compute_milestone_report(d, dict(M, name="v2"), date.today())
     assert "stale_prs" not in v1["reasons"] and "stale_prs" in v2["reasons"]
+
+
+def test_chart_numbers_are_consistent():
+    r = run_job.compute_milestone_report(scenario({1, 2, 3, 4, 5, 6, 7}), M, date.today())
+    assert r["total_weight"] == 30 and r["done_weight"] == 21           # 10 issues x M(3); 7 done
+    assert r["done_count"] == 7 and r["open_count"] == 3
+    assert abs(sum(r["contributions"].values()) - r["risk_score"]) < 0.2   # breakdown adds up to the score
+    assert r["days_left"] == 10
+
+
+def test_workload_per_developer():
+    d = scenario({1, 2, 3})
+    d["issues"][5]["assignee"] = "ravi"                                    # one open issue for ravi
+    w = {x["developer"]: x for x in run_job.compute_workload(d)}
+    assert w["asha"]["done_issues"] == 3 and w["ravi"]["open_issues"] == 1
+    assert w["ravi"]["remaining_days"] == 18.0   # 3 closed M issues took 18 days each -> median replaces the 3-day default

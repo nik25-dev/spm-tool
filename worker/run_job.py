@@ -24,6 +24,34 @@ def size_of(issue: dict) -> str:
     return "M"
 
 
+def estimate_days(data: dict) -> dict:
+    """Median cycle time (days) per size from ALL issues closed via a merged PR; defaults until 3+ samples."""
+    done = issues_closed_via_merged_pr(data)
+    cycle = {"S": [], "M": [], "L": []}
+    for i in data["issues"]:
+        if i["number"] in done and i["closed_at"]:
+            cycle[size_of(i)].append((i["closed_at"] - i["created_at"]).total_seconds() / 86400)
+    return {k: (median(v) if len(v) >= 3 else DEFAULT_DAYS[k]) for k, v in cycle.items()}
+
+
+def compute_workload(data: dict) -> list[dict]:
+    """Per developer: open issues, done issues (merged PR), and estimated days of work left."""
+    done, est, out = issues_closed_via_merged_pr(data), estimate_days(data), {}
+    for i in data["issues"]:
+        dev = i["assignee"]
+        if not dev:
+            continue
+        w = out.setdefault(dev, {"developer": dev, "open_issues": 0, "done_issues": 0, "remaining_days": 0.0})
+        if i["number"] in done:
+            w["done_issues"] += 1
+        else:
+            w["open_issues"] += 1
+            w["remaining_days"] += est[size_of(i)]
+    for w in out.values():
+        w["remaining_days"] = round(w["remaining_days"], 1)
+    return list(out.values())
+
+
 def compute_milestone_report(data: dict, milestone: dict, today: date) -> dict:
     start, end = date.fromisoformat(milestone["start"]), date.fromisoformat(milestone["end"])
     issues = [i for i in data["issues"] if i["milestone"] == milestone["name"]]
@@ -39,12 +67,7 @@ def compute_milestone_report(data: dict, milestone: dict, today: date) -> dict:
     pv = planned_value(today, start, end)
     index = spi(pct_done, pv)
 
-    # cycle-time history from ALL closed issues in the repo (the 'learning' data)
-    cycle = {"S": [], "M": [], "L": []}
-    for i in data["issues"]:
-        if i["number"] in done_numbers and i["closed_at"]:
-            cycle[size_of(i)].append((i["closed_at"] - i["created_at"]).total_seconds() / 86400)
-    est_days = {k: (median(v) if len(v) >= 3 else DEFAULT_DAYS[k]) for k, v in cycle.items()}
+    est_days = estimate_days(data)
 
     open_issues = [i for i in issues if i["number"] not in done_numbers]
     remaining_days = sum(est_days[size_of(i)] for i in open_issues)
@@ -84,6 +107,10 @@ def compute_milestone_report(data: dict, milestone: dict, today: date) -> dict:
         "risk_score": risk["score"], "status": risk["status"], "reasons": risk["top_reasons"],
         "remaining_days_est": round(remaining_days, 1),
         "summary": template_summary(milestone["name"], pct_done * 100, risk),
+        # extra numbers so the dashboard can draw burnup / risk-breakdown charts
+        "total_weight": total_w, "done_weight": done_w, "planned_weight": round(pv * total_w, 1),
+        "done_count": len(issues) - len(open_issues), "open_count": len(open_issues),
+        "days_left": days_left, "contributions": risk["parts"],
     }
 
 
@@ -114,8 +141,17 @@ def main():
                 "pct_done": rep["pct_done"], "pv": rep["pv"], "spi": rep["spi"],
                 "risk_score": rep["risk_score"], "status": rep["status"], "reasons": rep["reasons"],
                 "remaining_days_est": rep["remaining_days_est"], "summary": rep["summary"],
+                "total_weight": rep["total_weight"], "done_weight": rep["done_weight"],
+                "planned_weight": rep["planned_weight"], "done_count": rep["done_count"],
+                "open_count": rep["open_count"], "days_left": rep["days_left"],
+                "contributions": rep["contributions"],
             }, on_conflict="repo,milestone,report_date").execute()
             print(f"{repo} / {rep['milestone']}: {rep['pct_done']}% done, SPI {rep['spi']}, {rep['status']}")
+
+        for w in compute_workload(data):
+            sb.table("workload").upsert({"repo": repo, "report_date": today.isoformat(), **w},
+                                        on_conflict="repo,developer,report_date").execute()
+        print(f"{repo}: workload saved for {len(compute_workload(data))} developer(s)")
 
 
 if __name__ == "__main__":

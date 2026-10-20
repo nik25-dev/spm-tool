@@ -23,7 +23,8 @@ def delay_risk(signals: dict) -> dict:
     score = round(sum(parts.values()), 1)
     reasons = [k for k, _ in sorted(parts.items(), key=lambda kv: kv[1], reverse=True) if parts[k] > 0][:3]
     status = "green" if score < 30 else "yellow" if score <= 60 else "red"
-    return {"score": score, "status": status, "top_reasons": reasons}
+    return {"score": score, "status": status, "top_reasons": reasons,
+            "parts": {k: round(v, 1) for k, v in parts.items()}}
 
 
 # ---- Bus factor (simplified authorship-share version) ---------------------------------------
