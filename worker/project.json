@@ -4,6 +4,6 @@
   "cocomo_mode": "organic",
   "milestones": [
     { "name": "v1 Auth",     "start": "2026-10-20", "end": "2026-10-24" },
-    { "name": "v2 Payments", "start": "2026-10-20", "end": "2026-10-25" }
+    { "name": "v2 Payments", "start": "2026-10-20", "end": "2026-11-01" }
   ]
 }
