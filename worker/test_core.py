@@ -69,3 +69,13 @@ def test_template_summary():
     r = delay_risk({"schedule_slip": 0.8, "stale_prs": 1})
     text = template_summary("Payments", 42, r)
     assert "42% complete" in text and "behind the planned schedule" in text
+
+
+def test_workdays():
+    from datetime import date
+    fri, mon = date(2026, 10, 23), date(2026, 10, 26)
+    assert workdays_between(fri, mon, 5) == 1 and workdays_between(fri, mon, 7) == 3
+
+
+def test_confidence_ramp():
+    assert confidence(0.05) == 0 and confidence(0.25) == 1 and 0 < confidence(0.15) < 1

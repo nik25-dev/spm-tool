@@ -17,6 +17,11 @@ def clamp01(x: float) -> float:
     return max(0.0, min(1.0, x))
 
 
+def confidence(elapsed_fraction: float, lo: float = 0.10, hi: float = 0.25) -> float:
+    """Do not judge a milestone in its first 10% of planned time; full confidence from 25% onwards."""
+    return clamp01((elapsed_fraction - lo) / (hi - lo))
+
+
 def delay_risk(signals: dict) -> dict:
     """signals: each value already normalised to 0..1 (0 = healthy, 1 = bad)."""
     parts = {k: clamp01(signals.get(k, 0.0)) * w * 100 for k, w in WEIGHTS.items()}
@@ -76,7 +81,10 @@ REASON_TEXT = {
 }
 
 
-def template_summary(milestone: str, pct_done: float, risk: dict) -> str:
+def template_summary(milestone: str, pct_done: float, risk: dict, conf: float = 1.0) -> str:
     colour = {"green": "on track", "yellow": "at risk", "red": "likely to be late"}[risk["status"]]
     why = "; ".join(REASON_TEXT[r] for r in risk["top_reasons"]) or "no issues detected"
-    return f"{milestone} is {pct_done:.0f}% complete and {colour} (risk {risk['score']}/100). Main reasons: {why}."
+    text = f"{milestone} is {pct_done:.0f}% complete and {colour} (risk {risk['score']}/100). Main reasons: {why}."
+    if conf < 1.0:
+        text += " Early in the milestone, so this reading has low confidence."
+    return text

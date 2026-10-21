@@ -61,7 +61,8 @@ def test_chart_numbers_are_consistent():
     assert r["total_weight"] == 30 and r["done_weight"] == 21           # 10 issues x M(3); 7 done
     assert r["done_count"] == 7 and r["open_count"] == 3
     assert abs(sum(r["contributions"].values()) - r["risk_score"]) < 0.2   # breakdown adds up to the score
-    assert r["days_left"] == 10
+    from estimation import workdays_between
+    assert r["days_left"] == workdays_between(date.today(), date.fromisoformat(M["end"]), 5)
 
 
 def test_workload_per_developer():
@@ -70,3 +71,18 @@ def test_workload_per_developer():
     w = {x["developer"]: x for x in run_job.compute_workload(d)}
     assert w["asha"]["done_issues"] == 3 and w["ravi"]["open_issues"] == 1
     assert w["ravi"]["remaining_days"] == 18.0   # 3 closed M issues took 18 days each -> median replaces the 3-day default
+
+
+def test_untouched_milestone_is_not_flagged_on_day_zero():
+    d = scenario(set())
+    m = dict(M, start=date.today().isoformat(), end=(date.today() + timedelta(days=10)).isoformat())
+    r = run_job.compute_milestone_report(d, m, date.today())
+    assert r["confidence"] == 0 and "low confidence" in r["summary"]
+    assert r["contributions"]["schedule_slip"] == 0 and r["contributions"]["projected_late"] == 0   # no pace data yet = no verdict
+
+
+def test_scope_growth_is_measured_against_the_baseline():
+    d = scenario({1})
+    same = run_job.compute_milestone_report(d, M, date.today(), baseline_weight=30)
+    grown = run_job.compute_milestone_report(d, M, date.today(), baseline_weight=24)   # scope was 24, now 30
+    assert "scope_growth" not in same["reasons"] and grown["contributions"]["scope_growth"] > 0

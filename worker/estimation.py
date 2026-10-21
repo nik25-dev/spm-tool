@@ -1,4 +1,5 @@
 """Traditional estimation + earned value + blending. Pure formulas: no training, no data needed."""
+from datetime import timedelta
 from math import sqrt
 
 # ---- COCOMO 81 coefficients (a, b, c, d) -------------------------------------------------
@@ -42,12 +43,24 @@ def pert_rollup(items: list[dict]) -> dict:
 
 
 # ---- Earned value (schedule side only; we have no cost data) -------------------------------
-def planned_value(today, start, end) -> float:
-    """Planned % complete (0..1) assuming linear progress between start and end dates."""
-    total = (end - start).days
+def workdays_between(start, end, per_week: int = 5) -> int:
+    """Working days in (start, end]: Mon-Fri when per_week=5, every day when per_week=7."""
+    n, d = 0, start
+    while d < end:
+        d += timedelta(days=1)
+        if per_week >= 7 or d.weekday() < 5:
+            n += 1
+    return n
+
+
+def planned_value(today, start, end, per_week: int = 7) -> float:
+    """Planned % complete (0..1): share of the milestone's working days that have elapsed."""
+    total = workdays_between(start, end, per_week)
     if total <= 0:
         return 1.0
-    return min(1.0, max(0.0, (today - start).days / total))
+    if today <= start:
+        return 0.0
+    return min(1.0, workdays_between(start, min(today, end), per_week) / total)
 
 
 def spi(earned: float, planned: float) -> float:

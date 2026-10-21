@@ -9,8 +9,8 @@ import sys
 from datetime import date, datetime, timedelta, timezone
 from statistics import median
 
-from analytics import clamp01, delay_risk, template_summary
-from estimation import cocomo_basic, planned_value, spi
+from analytics import clamp01, confidence, delay_risk, template_summary
+from estimation import cocomo_basic, planned_value, spi, workdays_between
 from ingest import fetch_repo, issues_closed_via_merged_pr
 
 SIZE_POINTS = {"S": 1, "M": 3, "L": 5}
@@ -52,7 +52,8 @@ def compute_workload(data: dict) -> list[dict]:
     return list(out.values())
 
 
-def compute_milestone_report(data: dict, milestone: dict, today: date) -> dict:
+def compute_milestone_report(data: dict, milestone: dict, today: date,
+                             baseline_weight: float | None = None, per_week: int = 5) -> dict:
     start, end = date.fromisoformat(milestone["start"]), date.fromisoformat(milestone["end"])
     issues = [i for i in data["issues"] if i["milestone"] == milestone["name"]]
     if not issues:
@@ -64,7 +65,8 @@ def compute_milestone_report(data: dict, milestone: dict, today: date) -> dict:
     done_w = sum(w for n, w in weight.items() if n in done_numbers)
     pct_done = done_w / total_w
 
-    pv = planned_value(today, start, end)
+    pv = planned_value(today, start, end, per_week)
+    conf = confidence(pv)          # 0 at the very start, 1 once 25% of the milestone's time has passed
     index = spi(pct_done, pv)
 
     est_days = estimate_days(data)
@@ -72,13 +74,13 @@ def compute_milestone_report(data: dict, milestone: dict, today: date) -> dict:
     open_issues = [i for i in issues if i["number"] not in done_numbers]
     remaining_days = sum(est_days[size_of(i)] for i in open_issues)
 
-    # velocity = done weight in the last 14 days / 14
+    # pace = size points finished per WORKING day over the last 14 calendar days
     cutoff = datetime.now(timezone.utc) - timedelta(days=14)
     recent_done = sum(weight[i["number"]] for i in issues
                       if i["number"] in done_numbers and i["closed_at"] and i["closed_at"] >= cutoff)
-    velocity = recent_done / 14
+    velocity = recent_done / max(1, workdays_between(today - timedelta(days=14), today, per_week))
     remaining_w = total_w - done_w
-    days_left = max((end - today).days, 0)
+    days_left = workdays_between(today, end, per_week)
     if remaining_w == 0:
         projected_late = 0.0
     elif velocity == 0:
@@ -92,12 +94,13 @@ def compute_milestone_report(data: dict, milestone: dict, today: date) -> dict:
                 if p.get("state", "open") == "open" and not p["merged"] and set(p["closes"]) & ms_numbers]
     stale = [p for p in open_prs if (datetime.now(timezone.utc) - p["created_at"]).days > 3]
 
+    base = baseline_weight or total_w
     signals = {
-        "schedule_slip": clamp01(1 - index),
-        "projected_late": projected_late,
+        "schedule_slip": clamp01(1 - index) * conf,
+        "projected_late": projected_late * conf,
         "stale_prs": len(stale) / max(len(open_prs), 1) if open_prs else 0.0,
         "reopen_rate": 0.0,  # needs the issue-events API; add in a later phase
-        "scope_growth": clamp01(sum(1 for i in issues if i["created_at"].date() > start) / len(issues)),
+        "scope_growth": clamp01((total_w - base) / base),   # growth vs the first scope we ever saw
         "overdue_open": (len(open_issues) / len(issues)) if today > end and open_issues else 0.0,
     }
     risk = delay_risk(signals)
@@ -106,7 +109,8 @@ def compute_milestone_report(data: dict, milestone: dict, today: date) -> dict:
         "pct_done": round(pct_done * 100, 1), "pv": round(pv, 3), "spi": round(index, 2),
         "risk_score": risk["score"], "status": risk["status"], "reasons": risk["top_reasons"],
         "remaining_days_est": round(remaining_days, 1),
-        "summary": template_summary(milestone["name"], pct_done * 100, risk),
+        "summary": template_summary(milestone["name"], pct_done * 100, risk, conf),
+        "confidence": round(conf, 2),
         # extra numbers so the dashboard can draw burnup / risk-breakdown charts
         "total_weight": total_w, "done_weight": done_w, "planned_weight": round(pv * total_w, 1),
         "done_count": len(issues) - len(open_issues), "open_count": len(open_issues),
@@ -119,7 +123,8 @@ def main():
 
     config = json.load(open(os.path.join(os.path.dirname(__file__), "project.json")))
     sb = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_KEY"])
-    today = date.today()
+    today = date.today()           # NOTE: the runner uses the UTC date (05:30 IST = start of a new tool-day)
+    per_week = int(config.get('work_days_per_week', 5))
 
     for repo in config["repos"]:
         owner, name = repo.split("/")
@@ -133,7 +138,10 @@ def main():
         }, on_conflict="repo,report_date").execute()
 
         for m in config["milestones"]:
-            rep = compute_milestone_report(data, m, today)
+            first = (sb.table("milestone_reports").select("report_date,total_weight").eq("repo", repo)
+                     .eq("milestone", m["name"]).order("report_date").execute().data)
+            base = next((float(r["total_weight"]) for r in first if r["total_weight"] is not None), None)
+            rep = compute_milestone_report(data, m, today, base, per_week)
             if rep["empty"]:
                 continue
             sb.table("milestone_reports").upsert({
@@ -146,7 +154,7 @@ def main():
                 "open_count": rep["open_count"], "days_left": rep["days_left"],
                 "contributions": rep["contributions"],
             }, on_conflict="repo,milestone,report_date").execute()
-            print(f"{repo} / {rep['milestone']}: {rep['pct_done']}% done, SPI {rep['spi']}, {rep['status']}")
+            print(f"{repo} / {rep['milestone']}: {rep['pct_done']}% done, SPI {rep['spi']}, risk {rep['risk_score']} ({rep['status']}), confidence {rep['confidence']}")
 
         for w in compute_workload(data):
             sb.table("workload").upsert({"repo": repo, "report_date": today.isoformat(), **w},
