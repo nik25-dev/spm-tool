@@ -86,3 +86,12 @@ def test_scope_growth_is_measured_against_the_baseline():
     same = run_job.compute_milestone_report(d, M, date.today(), baseline_weight=30)
     grown = run_job.compute_milestone_report(d, M, date.today(), baseline_weight=24)   # scope was 24, now 30
     assert "scope_growth" not in same["reasons"] and grown["contributions"]["scope_growth"] > 0
+
+
+def test_pace_ignores_days_before_the_milestone_started():
+    # milestone began 3 days ago; 5 of 10 tasks done since -> pace is fine, so no 'projected late'
+    d = scenario({1, 2, 3, 4, 5})
+    m = {"name": "v1", "start": (date.today() - timedelta(days=3)).isoformat(), "end": (date.today() + timedelta(days=4)).isoformat()}
+    r = run_job.compute_milestone_report(d, m, date.today(), per_week=7)
+    assert r["contributions"]["projected_late"] == 0
+    assert r["due_date"] == m["end"] and r["start_date"] == m["start"]

@@ -74,11 +74,12 @@ def compute_milestone_report(data: dict, milestone: dict, today: date,
     open_issues = [i for i in issues if i["number"] not in done_numbers]
     remaining_days = sum(est_days[size_of(i)] for i in open_issues)
 
-    # pace = size points finished per WORKING day over the last 14 calendar days
-    cutoff = datetime.now(timezone.utc) - timedelta(days=14)
+    # pace = size points finished per WORKING day, over the last 14 days but never before the milestone started
+    window_start = max(today - timedelta(days=14), start)
+    cutoff = datetime.combine(window_start, datetime.min.time(), tzinfo=timezone.utc)
     recent_done = sum(weight[i["number"]] for i in issues
                       if i["number"] in done_numbers and i["closed_at"] and i["closed_at"] >= cutoff)
-    velocity = recent_done / max(1, workdays_between(today - timedelta(days=14), today, per_week))
+    velocity = recent_done / max(1, workdays_between(window_start, today, per_week))
     remaining_w = total_w - done_w
     days_left = workdays_between(today, end, per_week)
     if remaining_w == 0:
@@ -115,6 +116,7 @@ def compute_milestone_report(data: dict, milestone: dict, today: date,
         "total_weight": total_w, "done_weight": done_w, "planned_weight": round(pv * total_w, 1),
         "done_count": len(issues) - len(open_issues), "open_count": len(open_issues),
         "days_left": days_left, "contributions": risk["parts"],
+        "start_date": start.isoformat(), "due_date": end.isoformat(),
     }
 
 
@@ -135,6 +137,8 @@ def main():
             "repo": repo, "report_date": today.isoformat(),
             "cocomo_effort_pm": round(cc["effort_pm"], 1), "cocomo_months": round(cc["months"], 1),
             "cocomo_team": round(cc["avg_team"], 1),
+            "start_date": min(m["start"] for m in config["milestones"]),
+            "due_date": config.get("project_end") or max(m["end"] for m in config["milestones"]),
         }, on_conflict="repo,report_date").execute()
 
         for m in config["milestones"]:
@@ -153,6 +157,7 @@ def main():
                 "planned_weight": rep["planned_weight"], "done_count": rep["done_count"],
                 "open_count": rep["open_count"], "days_left": rep["days_left"],
                 "contributions": rep["contributions"],
+                "start_date": rep["start_date"], "due_date": rep["due_date"],
             }, on_conflict="repo,milestone,report_date").execute()
             print(f"{repo} / {rep['milestone']}: {rep['pct_done']}% done, SPI {rep['spi']}, risk {rep['risk_score']} ({rep['status']}), confidence {rep['confidence']}")
 
