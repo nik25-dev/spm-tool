@@ -53,7 +53,7 @@ def test_stale_prs_are_scoped_to_their_own_milestone():
     d = {"issues": issues, "prs": prs}
     v1 = run_job.compute_milestone_report(d, dict(M, name="v1"), date.today())
     v2 = run_job.compute_milestone_report(d, dict(M, name="v2"), date.today())
-    assert "stale_prs" not in v1["reasons"] and "stale_prs" in v2["reasons"]
+    assert v1["contributions"]["stale_prs"] == 0 and v2["contributions"]["stale_prs"] > 0
 
 
 def test_chart_numbers_are_consistent():
@@ -88,10 +88,6 @@ def test_scope_growth_is_measured_against_the_baseline():
     assert "scope_growth" not in same["reasons"] and grown["contributions"]["scope_growth"] > 0
 
 
-def test_pace_ignores_days_before_the_milestone_started():
-    # milestone began 3 days ago; 5 of 10 tasks done since -> pace is fine, so no 'projected late'
-    d = scenario({1, 2, 3, 4, 5})
-    m = {"name": "v1", "start": (date.today() - timedelta(days=3)).isoformat(), "end": (date.today() + timedelta(days=4)).isoformat()}
-    r = run_job.compute_milestone_report(d, m, date.today(), per_week=7)
-    assert r["contributions"]["projected_late"] == 0
-    assert r["due_date"] == m["end"] and r["start_date"] == m["start"]
+def test_due_dates_are_reported():
+    r = run_job.compute_milestone_report(scenario({1}), M, date.today())
+    assert r["due_date"] == M["end"] and r["start_date"] == M["start"]

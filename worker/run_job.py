@@ -12,6 +12,7 @@ from statistics import median
 from analytics import clamp01, confidence, delay_risk, template_summary
 from estimation import cocomo_basic, planned_value, spi, workdays_between
 from ingest import fetch_repo, issues_closed_via_merged_pr
+from planning import add_workdays, build_findings, critical_path, project_rollup, waiting_on
 
 SIZE_POINTS = {"S": 1, "M": 3, "L": 5}
 DEFAULT_DAYS = {"S": 1.0, "M": 3.0, "L": 5.0}   # used until we have real closed issues (cold start)
@@ -24,19 +25,20 @@ def size_of(issue: dict) -> str:
     return "M"
 
 
-def estimate_days(data: dict) -> dict:
+def estimate_days(data: dict, defaults: dict | None = None) -> dict:
     """Median cycle time (days) per size from ALL issues closed via a merged PR; defaults until 3+ samples."""
     done = issues_closed_via_merged_pr(data)
     cycle = {"S": [], "M": [], "L": []}
     for i in data["issues"]:
         if i["number"] in done and i["closed_at"]:
             cycle[size_of(i)].append((i["closed_at"] - i["created_at"]).total_seconds() / 86400)
-    return {k: (median(v) if len(v) >= 3 else DEFAULT_DAYS[k]) for k, v in cycle.items()}
+    base = {**DEFAULT_DAYS, **(defaults or {})}
+    return {k: (median(v) if len(v) >= 3 else base[k]) for k, v in cycle.items()}
 
 
-def compute_workload(data: dict) -> list[dict]:
+def compute_workload(data: dict, size_days: dict | None = None) -> list[dict]:
     """Per developer: open issues, done issues (merged PR), and estimated days of work left."""
-    done, est, out = issues_closed_via_merged_pr(data), estimate_days(data), {}
+    done, est, out = issues_closed_via_merged_pr(data), estimate_days(data, size_days), {}
     for i in data["issues"]:
         dev = i["assignee"]
         if not dev:
@@ -52,71 +54,139 @@ def compute_workload(data: dict) -> list[dict]:
     return list(out.values())
 
 
-def compute_milestone_report(data: dict, milestone: dict, today: date,
-                             baseline_weight: float | None = None, per_week: int = 5) -> dict:
+def compute_milestone_report(data: dict, milestone: dict, today: date, baseline_weight: float | None = None,
+                             per_week: int = 5, team_cfg: dict | None = None, idle: str | None = None,
+                             baseline_date: date | None = None, size_days: dict | None = None) -> dict:
+    team_cfg = team_cfg or {}
     start, end = date.fromisoformat(milestone["start"]), date.fromisoformat(milestone["end"])
     issues = [i for i in data["issues"] if i["milestone"] == milestone["name"]]
     if not issues:
         return {"milestone": milestone["name"], "empty": True}
 
-    done_numbers = issues_closed_via_merged_pr(data)
-    weight = {i["number"]: SIZE_POINTS[size_of(i)] for i in issues}
+    done = issues_closed_via_merged_pr(data)
+    by_num = {i["number"]: i for i in issues}
+    weight = {n: SIZE_POINTS[size_of(i)] for n, i in by_num.items()}
     total_w = sum(weight.values())
-    done_w = sum(w for n, w in weight.items() if n in done_numbers)
+    done_w = sum(w for n, w in weight.items() if n in done)
     pct_done = done_w / total_w
 
     pv = planned_value(today, start, end, per_week)
-    conf = confidence(pv)          # 0 at the very start, 1 once 25% of the milestone's time has passed
+    conf = confidence(pv)                     # 0 at the very start, 1 once 25% of the milestone's time has passed
     index = spi(pct_done, pv)
 
-    est_days = estimate_days(data)
+    # ---- remaining work, dependencies, critical path
+    est = estimate_days(data, size_days)
+    open_issues = [i for i in issues if i["number"] not in done]
+    open_nums = {i["number"] for i in open_issues}
+    days_of = {i["number"]: est[size_of(i)] for i in open_issues}
+    needs = sum(days_of.values())                                   # person-days, one task at a time
+    blockers = {n: [b for b in (by_num[n].get("blocked_by") or []) if b in open_nums] for n in open_nums}
+    tasks = {n: {"days": days_of[n], "blocked_by": blockers[n]} for n in open_nums}
+    crit_len, chain = critical_path(tasks)
+    if crit_len is None:                                            # circular dependencies: ignore them
+        tasks = {n: {"days": days_of[n], "blocked_by": []} for n in open_nums}
+        crit_len, chain = critical_path(tasks)
+    blocked_nums = [n for n, b in blockers.items() if b] if chain is not None else []
 
-    open_issues = [i for i in issues if i["number"] not in done_numbers]
-    remaining_days = sum(est_days[size_of(i)] for i in open_issues)
-
-    # pace = size points finished per WORKING day, over the last 14 days but never before the milestone started
-    window_start = max(today - timedelta(days=14), start)
-    cutoff = datetime.combine(window_start, datetime.min.time(), tzinfo=timezone.utc)
-    recent_done = sum(weight[i["number"]] for i in issues
-                      if i["number"] in done_numbers and i["closed_at"] and i["closed_at"] >= cutoff)
-    velocity = recent_done / max(1, workdays_between(window_start, today, per_week))
-    remaining_w = total_w - done_w
+    # ---- capacity and forecast (working days)
+    devs = sorted({i["assignee"] for i in issues if i["assignee"]})
+    team = max(sum(float(team_cfg.get(d, {}).get("availability", 1.0)) for d in devs), 1.0)
     days_left = workdays_between(today, end, per_week)
-    if remaining_w == 0:
-        projected_late = 0.0
-    elif velocity == 0:
-        projected_late = 1.0
+    planned_days = workdays_between(start, end, per_week)
+    elapsed = workdays_between(start, min(today, end), per_week) if today > start else 0
+    if open_issues:
+        parts = {"capacity": needs / team, "critical": crit_len or 0.0}
+        if conf >= 1.0:
+            parts["evm"] = max(0.0, planned_days / max(index, 0.25) - elapsed)  # classic: planned duration / SPI, SPI floored at 0.25
+        forecast_days = max(parts.values())
     else:
-        projected_late = clamp01((remaining_w / velocity - days_left) / max(days_left, 1))
+        forecast_days = 0.0
+    forecast = add_workdays(today, forecast_days, per_week)
+    slip = max(0.0, forecast_days - days_left)
+    projected_late = clamp01(slip / max(days_left, 1)) if open_issues else 0.0
 
-    # only PRs that reference THIS milestone's issues ("Closes #N") count toward its stale-PR signal
-    ms_numbers = {i["number"] for i in issues}
-    open_prs = [p for p in data["prs"]
-                if p.get("state", "open") == "open" and not p["merged"] and set(p["closes"]) & ms_numbers]
-    stale = [p for p in open_prs if (datetime.now(timezone.utc) - p["created_at"]).days > 3]
+    # ---- PRs tied to this milestone
+    now = datetime.now(timezone.utc)
+    pr_for = {}
+    for p in data["prs"]:
+        if p.get("state", "open") == "open" and not p["merged"]:
+            for n in p["closes"]:
+                if n in by_num:
+                    pr_for.setdefault(n, p)
+    ms_prs = {p["number"]: p for p in pr_for.values()}
+    stale = [{"number": p["number"], "author": p["author"], "age": (now - p["created_at"]).total_seconds() / 86400}
+             for p in ms_prs.values() if (now - p["created_at"]).days > 3]
 
-    base = baseline_weight or total_w
+    # ---- critical-path head
+    head = None
+    if chain:
+        h = chain[0]
+        p = pr_for.get(h)
+        head = {"number": h, "title": by_num[h]["title"], "assignee": by_num[h]["assignee"],
+                "pr": {"number": p["number"], "age": (now - p["created_at"]).total_seconds() / 86400, "author": p["author"]} if p else None,
+                "unblocks": waiting_on(h, tasks)}
+    if head and head["pr"]:
+        critical_delay = 1.0 if head["pr"]["age"] > 3 else 0.0
+    elif head:
+        critical_delay = clamp01((pv - 0.5) / 0.25)                 # an unstarted head only matters once half the time is gone
+    else:
+        critical_delay = 0.0
+
+    # ---- testing window
+    test_days = int(milestone.get("test_days", 0))
+    test_left = workdays_between(forecast, end, per_week) if forecast <= end else 0
+    testing = clamp01((test_days - test_left) / test_days) if test_days > 0 and open_issues else 0.0
+
+    baseline = baseline_weight or total_w
     signals = {
         "schedule_slip": clamp01(1 - index) * conf,
         "projected_late": projected_late * conf,
-        "stale_prs": len(stale) / max(len(open_prs), 1) if open_prs else 0.0,
-        "reopen_rate": 0.0,  # needs the issue-events API; add in a later phase
-        "scope_growth": clamp01((total_w - base) / base),   # growth vs the first scope we ever saw
+        "critical_delay": critical_delay,
+        "blocked_work": (len(blocked_nums) / len(open_issues) * conf) if open_issues else 0.0,
+        "stale_prs": len(stale) / max(len(ms_prs), 1) if ms_prs else 0.0,
+        "scope_growth": clamp01((total_w - baseline) / baseline),
+        "testing_squeeze": testing * conf,
         "overdue_open": (len(open_issues) / len(issues)) if today > end and open_issues else 0.0,
     }
     risk = delay_risk(signals)
+
+    # ---- specific findings (public: no names; lead: with names)
+    busiest = max(devs, key=lambda d: sum(days_of[n] for n in open_nums if by_num[n]["assignee"] == d), default=None)
+    cands = [n for n in open_nums if by_num[n]["assignee"] == busiest and not blockers[n] and n not in pr_for]
+    cand = None
+    if cands:
+        c = max(cands, key=lambda n: days_of[n])
+        cand = {"number": c, "title": by_num[c]["title"], "from": busiest}
+    added = [{"number": n, "title": by_num[n]["title"]} for n in sorted(by_num)
+             if baseline_date and by_num[n]["created_at"].date() > baseline_date]
+    pub, lead = build_findings({
+        "milestone": milestone["name"], "pv": pv, "head": head, "slip": slip, "forecast": forecast, "due": end,
+        "candidate": cand, "idle": idle if idle and idle != busiest else None,
+        "test_days": test_days, "test_left": test_left, "stale": stale, "scope_added": added,
+        "scope_pct": max(0.0, (total_w - baseline) / baseline * 100),
+        "overdue": len(open_issues) if today > end else 0,
+    })
+
+    graph = {"nodes": [{"n": n, "title": by_num[n]["title"][:40], "size": size_of(by_num[n]),
+                        "state": "done" if n in done else ("blocked" if n in blocked_nums else "open"),
+                        "critical": n in (chain or [])} for n in sorted(by_num)],
+             "edges": [[b, n] for n in sorted(by_num) for b in (by_num[n].get("blocked_by") or []) if b in by_num]}
+
     return {
         "milestone": milestone["name"], "empty": False,
         "pct_done": round(pct_done * 100, 1), "pv": round(pv, 3), "spi": round(index, 2),
         "risk_score": risk["score"], "status": risk["status"], "reasons": risk["top_reasons"],
-        "remaining_days_est": round(remaining_days, 1),
+        "remaining_days_est": round(needs, 1),
         "summary": template_summary(milestone["name"], pct_done * 100, risk, conf),
         "confidence": round(conf, 2),
-        # extra numbers so the dashboard can draw burnup / risk-breakdown charts
         "total_weight": total_w, "done_weight": done_w, "planned_weight": round(pv * total_w, 1),
         "done_count": len(issues) - len(open_issues), "open_count": len(open_issues),
         "days_left": days_left, "contributions": risk["parts"],
         "start_date": start.isoformat(), "due_date": end.isoformat(),
+        "capacity_person_days": round(team * days_left, 1), "forecast_date": forecast.isoformat(),
+        "slip_days": round(slip, 1), "blocked_count": len(blocked_nums), "critical_days": round(crit_len or 0, 1),
+        "critical_path": chain or [], "test_days": test_days, "test_days_left": test_left,
+        "graph": graph, "findings": pub, "findings_lead": lead,
     }
 
 
@@ -126,45 +196,58 @@ def main():
     config = json.load(open(os.path.join(os.path.dirname(__file__), "project.json")))
     sb = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_KEY"])
     today = date.today()           # NOTE: the runner uses the UTC date (05:30 IST = start of a new tool-day)
-    per_week = int(config.get('work_days_per_week', 5))
+    per_week = int(config.get("work_days_per_week", 5))
+    team_cfg = {t["github"]: t for t in config.get("team", [])}
+    names = [m["name"] for m in config["milestones"]]
+    size_days = config.get("size_days")
 
     for repo in config["repos"]:
         owner, name = repo.split("/")
-        data = fetch_repo(owner, name)
+        data = fetch_repo(owner, name, names)
+        workload = compute_workload(data, size_days)
+        busy = {w["developer"]: w["open_issues"] for w in workload}
+        idle = next((d for d in list(team_cfg) + list(busy) if busy.get(d, 0) == 0), None)
+
+        reports = []
+        for m in config["milestones"]:
+            first = (sb.table("milestone_reports").select("report_date,total_weight").eq("repo", repo)
+                     .eq("milestone", m["name"]).order("report_date").execute().data)
+            row0 = next((r for r in first if r["total_weight"] is not None), None)
+            base = float(row0["total_weight"]) if row0 else None
+            bdate = date.fromisoformat(row0["report_date"]) if row0 else None
+            rep = compute_milestone_report(data, m, today, base, per_week, team_cfg, idle, bdate, size_days)
+            if rep["empty"]:
+                continue
+            reports.append(rep)
+            sb.table("milestone_reports").upsert({
+                "repo": repo, "milestone": rep["milestone"], "report_date": today.isoformat(),
+                **{k: rep[k] for k in ("pct_done", "pv", "spi", "risk_score", "status", "reasons", "remaining_days_est",
+                                       "summary", "total_weight", "done_weight", "planned_weight", "done_count", "open_count",
+                                       "days_left", "contributions", "start_date", "due_date", "capacity_person_days",
+                                       "forecast_date", "slip_days", "blocked_count", "critical_days", "critical_path",
+                                       "test_days", "test_days_left", "graph")},
+                "findings": rep["findings"],
+            }, on_conflict="repo,milestone,report_date").execute()
+            sb.table("lead_notes").upsert({"repo": repo, "milestone": rep["milestone"], "report_date": today.isoformat(),
+                                           "findings": rep["findings_lead"]}, on_conflict="repo,milestone,report_date").execute()
+            print(f"{repo} / {rep['milestone']}: {rep['pct_done']}% done, SPI {rep['spi']}, risk {rep['risk_score']} "
+                  f"({rep['status']}), forecast {rep['forecast_date']} vs due {rep['due_date']}, blocked {rep['blocked_count']}")
 
         cc = cocomo_basic(config["kloc"], config.get("cocomo_mode", "organic"))
+        roll = project_rollup(reports, config, today, per_week) if reports else {}
         sb.table("project_reports").upsert({
             "repo": repo, "report_date": today.isoformat(),
             "cocomo_effort_pm": round(cc["effort_pm"], 1), "cocomo_months": round(cc["months"], 1),
             "cocomo_team": round(cc["avg_team"], 1),
             "start_date": min(m["start"] for m in config["milestones"]),
             "due_date": config.get("project_end") or max(m["end"] for m in config["milestones"]),
+            **roll,
         }, on_conflict="repo,report_date").execute()
 
-        for m in config["milestones"]:
-            first = (sb.table("milestone_reports").select("report_date,total_weight").eq("repo", repo)
-                     .eq("milestone", m["name"]).order("report_date").execute().data)
-            base = next((float(r["total_weight"]) for r in first if r["total_weight"] is not None), None)
-            rep = compute_milestone_report(data, m, today, base, per_week)
-            if rep["empty"]:
-                continue
-            sb.table("milestone_reports").upsert({
-                "repo": repo, "milestone": rep["milestone"], "report_date": today.isoformat(),
-                "pct_done": rep["pct_done"], "pv": rep["pv"], "spi": rep["spi"],
-                "risk_score": rep["risk_score"], "status": rep["status"], "reasons": rep["reasons"],
-                "remaining_days_est": rep["remaining_days_est"], "summary": rep["summary"],
-                "total_weight": rep["total_weight"], "done_weight": rep["done_weight"],
-                "planned_weight": rep["planned_weight"], "done_count": rep["done_count"],
-                "open_count": rep["open_count"], "days_left": rep["days_left"],
-                "contributions": rep["contributions"],
-                "start_date": rep["start_date"], "due_date": rep["due_date"],
-            }, on_conflict="repo,milestone,report_date").execute()
-            print(f"{repo} / {rep['milestone']}: {rep['pct_done']}% done, SPI {rep['spi']}, risk {rep['risk_score']} ({rep['status']}), confidence {rep['confidence']}")
-
-        for w in compute_workload(data):
+        for w in workload:
             sb.table("workload").upsert({"repo": repo, "report_date": today.isoformat(), **w},
                                         on_conflict="repo,developer,report_date").execute()
-        print(f"{repo}: workload saved for {len(compute_workload(data))} developer(s)")
+        print(f"{repo}: workload saved for {len(workload)} developer(s)")
 
 
 if __name__ == "__main__":

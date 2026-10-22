@@ -2,6 +2,7 @@ from datetime import date
 import random
 from estimation import *
 from analytics import *
+from analytics import WEIGHTS
 
 
 def test_cocomo_basic_10kloc():
@@ -39,9 +40,10 @@ def test_blend_cold_start_uses_formula():
 def test_delay_risk_levels_and_reasons():
     healthy = delay_risk({})
     assert healthy["status"] == "green" and healthy["top_reasons"] == []
-    bad = delay_risk({"schedule_slip": 1, "projected_late": 1, "stale_prs": 1})
-    assert bad["status"] == "red" and bad["top_reasons"][0] == "schedule_slip"
-    assert delay_risk({"schedule_slip": 5})["score"] == 30.0  # clamped to 1
+    bad = delay_risk({"schedule_slip": 1, "projected_late": 1, "critical_delay": 1, "blocked_work": 1, "stale_prs": 1})
+    assert bad["score"] == 75.0 and bad["status"] == "red" and bad["top_reasons"][0] == "schedule_slip"
+    assert delay_risk({"schedule_slip": 5})["score"] == 20.0  # clamped to 1
+    assert round(sum(WEIGHTS.values()), 6) == 1.0             # the weights add up to 100 points
 
 
 def test_bus_factor():

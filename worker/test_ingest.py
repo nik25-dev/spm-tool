@@ -6,13 +6,17 @@ def fake_get(url, headers=None, params=None, timeout=None):
     r = MagicMock()
     r.raise_for_status.return_value = None
     r.links = {}
+    r.status_code = 200
+    if "/dependencies/blocked_by" in url:
+        r.json.return_value = [{"number": 1}] if "/issues/2/" in url else []
+        return r
     if url.endswith("/issues"):
         r.json.return_value = [
             {"number": 1, "title": "Login page", "state": "closed", "labels": [{"name": "size:M"}],
              "milestone": {"title": "v1"}, "assignee": {"login": "asha"},
              "created_at": "2026-10-01T09:00:00Z", "closed_at": "2026-10-05T09:00:00Z"},
             {"number": 2, "title": "Payments", "state": "open", "labels": [], "milestone": None, "assignee": None,
-             "created_at": "2026-10-02T09:00:00Z", "closed_at": None},
+             "created_at": "2026-10-02T09:00:00Z", "closed_at": None, "body": "Depends on #1"},
             {"number": 3, "title": "A PR listed as issue", "state": "closed", "labels": [], "pull_request": {},
              "created_at": "2026-10-03T09:00:00Z", "closed_at": None},
         ]
@@ -33,3 +37,21 @@ def test_fetch_and_link():
     assert d["issues"][0]["labels"] == ["size:M"] and d["issues"][0]["milestone"] == "v1"
     assert d["prs"][0]["closes"] == [1] and d["prs"][1]["closes"] == [2]
     assert ingest.issues_closed_via_merged_pr(d) == {1}             # PR 4 is unmerged -> issue 2 NOT done
+
+
+def test_dependencies_native_and_text_fallback():
+    with patch("ingest.requests.get", side_effect=fake_get):
+        d = ingest.fetch_repo("o", "r")
+    by = {i["number"]: i for i in d["issues"]}
+    assert by[2]["blocked_by"] == [1]                       # from the native endpoint (and the text says the same)
+    assert by[1]["blocked_by"] == []
+
+
+def test_dependencies_endpoint_unavailable_falls_back_to_text():
+    def denied(url, headers=None, params=None, timeout=None):
+        if "/dependencies/" in url:
+            r = MagicMock(); r.status_code = 404; return r
+        return fake_get(url, headers, params, timeout)
+    with patch("ingest.requests.get", side_effect=denied):
+        d = ingest.fetch_repo("o", "r")
+    assert {i["number"]: i for i in d["issues"]}[2]["blocked_by"] == [1]    # 'Depends on #1' in the issue text

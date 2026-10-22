@@ -31,11 +31,29 @@ def _get_all(path: str, params: dict | None = None, max_pages: int = 5) -> list[
     return out
 
 
+TEXT_DEP = re.compile(r"\b(?:blocked by|depends on)\s+#(\d+)", re.I)
+
+
+def fetch_dependencies(owner: str, repo: str, numbers: list) -> dict:
+    """GitHub's native 'blocked by' relationships, one request per issue. Returns {issue: [blocker numbers]}.
+    If the endpoint is unavailable for this token, returns {} and the caller falls back to 'Blocked by #N' in the text."""
+    out = {}
+    for n in numbers:
+        r = requests.get(f"{API}/repos/{owner}/{repo}/issues/{n}/dependencies/blocked_by",
+                         headers=_headers(), params={"per_page": 100}, timeout=30)
+        if r.status_code >= 400:
+            print(f"note: dependencies API returned {r.status_code} for #{n}; using text fallback only")
+            return {}
+        r.raise_for_status()
+        out[n] = [b["number"] for b in r.json()]
+    return out
+
+
 def _dt(s):
     return datetime.fromisoformat(s.replace("Z", "+00:00")) if s else None
 
 
-def fetch_repo(owner: str, repo: str) -> dict:
+def fetch_repo(owner: str, repo: str, milestones: list | None = None) -> dict:
     issues_raw = _get_all(f"/repos/{owner}/{repo}/issues", {"state": "all"})
     prs_raw = _get_all(f"/repos/{owner}/{repo}/pulls", {"state": "all"})
 
@@ -44,7 +62,7 @@ def fetch_repo(owner: str, repo: str) -> dict:
         "number": i["number"], "title": i["title"], "state": i["state"],
         "labels": [l["name"] for l in i["labels"]],
         "milestone": (i.get("milestone") or {}).get("title"),
-        "assignee": (i.get("assignee") or {}).get("login"),
+        "assignee": (i.get("assignee") or {}).get("login"), "body": i.get("body") or "",
         "created_at": _dt(i["created_at"]), "closed_at": _dt(i["closed_at"]),
     } for i in issues_raw if "pull_request" not in i]
 
@@ -55,6 +73,12 @@ def fetch_repo(owner: str, repo: str) -> dict:
         # PRs that say "Closes #12" in title/body link to those issues
         "closes": sorted({int(n) for n in CLOSES.findall((p["title"] or "") + " " + (p["body"] or ""))}),
     } for p in prs_raw]
+    # dependencies: native relationships for OPEN issues in the tracked milestones, plus 'Blocked by #N' written in the text
+    wanted = [x["number"] for x in issues if x["state"] == "open" and (milestones is None or x["milestone"] in milestones)]
+    native = fetch_dependencies(owner, repo, wanted) if wanted else {}
+    for x in issues:
+        text_deps = [int(n) for n in TEXT_DEP.findall(x["body"])]
+        x["blocked_by"] = sorted(set(native.get(x["number"], [])) | set(text_deps))
     return {"issues": issues, "prs": prs}
 
 

@@ -4,12 +4,14 @@ from statistics import median
 
 # ---- Delay risk (0-100): weighted, explainable, NO training ----------------------------------
 WEIGHTS = {
-    "schedule_slip": 0.30,   # 1 - SPI
-    "projected_late": 0.25,  # projected finish after due date
-    "stale_prs": 0.15,       # open PRs with no review for > 3 days
-    "reopen_rate": 0.10,     # reopened / closed issues
-    "scope_growth": 0.10,    # issues added after kickoff / original scope
-    "overdue_open": 0.10,    # open issues past their due date / open issues
+    "schedule_slip": 0.20,     # 1 - SPI                                   (x confidence)
+    "projected_late": 0.20,    # forecast finish after the due date         (x confidence)
+    "critical_delay": 0.15,    # first task on the critical path is stuck or not started
+    "blocked_work": 0.10,      # share of open tasks waiting on unfinished work   (x confidence)
+    "stale_prs": 0.10,         # open PRs of this milestone waiting > 3 full days
+    "scope_growth": 0.10,      # work added since the first scope we saw
+    "testing_squeeze": 0.10,   # forecast eats into the planned testing days (x confidence)
+    "overdue_open": 0.05,      # open tasks after the due date
 }
 
 
@@ -78,6 +80,9 @@ REASON_TEXT = {
     "reopen_rate": "many finished tasks had to be reopened",
     "scope_growth": "new tasks were added after the plan was set",
     "overdue_open": "some open tasks are already overdue",
+    "critical_delay": "the first task on the critical path is stuck",
+    "blocked_work": "tasks are waiting on unfinished work",
+    "testing_squeeze": "the testing window is shrinking",
 }
 
 
