@@ -71,3 +71,25 @@ def test_project_rollup_with_budget():
     out = project_rollup(reps, cfg, date.today(), 7)
     assert out["ev_pct"] == 30.0 and out["pv_pct"] == 50.0 and out["spi"] == 0.6 and out["forecast_date"] == "2026-10-28"
     assert out["ac"] == 1500 * 4 and out["cpi"] == round(30000 / 6000, 2) and out["eac"] == 20000
+
+
+def test_dev_tasks_status_blockers_and_days():
+    d = payments()
+    d["issues"][3]["state"] = "closed"; d["issues"][3]["closed_at"] = NOW              # #10 (tax) merged
+    d["prs"].append({"number": 110, "title": "x", "author": "meena", "state": "closed", "merged": True, "merged_at": NOW,
+                     "created_at": NOW - timedelta(days=3), "closes": [10]})
+    rows = {r["number"]: r for r in run_job.compute_dev_tasks(d, ["v2 Payments"], date.today(), 7)}
+    assert rows[7]["status"] == "in_review" and rows[7]["days_open"] == 4              # PR open for 4 days, no blockers
+    assert rows[8]["status"] == "blocked" and rows[8]["blocked_by"] == [{"n": 7, "title": "task 7"}]
+    assert rows[10]["status"] == "done" and rows[10]["days_taken"] == 3                # PR opened 3 days before merge
+    assert rows[9]["pr_number"] is None and rows[9]["days_open"] is None               # not started
+    assert rows[11]["blocked_by"] == [{"n": 8, "title": "task 8"}, {"n": 9, "title": "task 9"}]   # #10 is done, so it no longer blocks
+
+
+def test_working_days_are_reported():
+    r = run_job.compute_milestone_report(payments(), MS, date.today(), per_week=7)
+    assert r["work_days_total"] == 8 and r["work_days_elapsed"] == 4 and r["days_left"] == 4
+    reps = [{"total_weight": 10, "done_weight": 5, "planned_weight": 5, "slip_days": 0.0}]
+    cfg = {"milestones": [{"start": START.isoformat(), "end": (START + timedelta(days=8)).isoformat()}], "project_end": (START + timedelta(days=8)).isoformat()}
+    out = project_rollup(reps, cfg, date.today(), 7)
+    assert out["work_days_total"] == 8 and out["work_days_elapsed"] == 4

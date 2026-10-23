@@ -61,6 +61,40 @@ def compute_workload(data: dict, size_days: dict | None = None) -> list[dict]:
     return list(out.values())
 
 
+def compute_dev_tasks(data: dict, names: list, today: date, per_week: int = 5, size_days: dict | None = None) -> list:
+    """One row per task in the tracked milestones: status, what blocks it, and how many WORKING days it took (PR opened -> merged).
+    GitHub records no work hours, and we deliberately do not analyse commit times, so we count working days only."""
+    done, est, now = issues_closed_via_merged_pr(data), estimate_days(data, size_days), datetime.now(timezone.utc)
+    titles = {i["number"]: i["title"] for i in data["issues"]}
+    open_nums = {i["number"] for i in data["issues"] if i["number"] not in done}
+    pr_for = {}
+    for p in data["prs"]:
+        for n in p["closes"]:
+            if n not in pr_for or (p["merged"] and not pr_for[n]["merged"]):
+                pr_for[n] = p
+    out = []
+    for i in data["issues"]:
+        if i["milestone"] not in names or not i["assignee"]:
+            continue
+        n, pr = i["number"], pr_for.get(i["number"])
+        blockers = [{"n": b, "title": titles.get(b, "")} for b in (i.get("blocked_by") or []) if b in open_nums]
+        started = pr["created_at"] if pr else None
+        row = {"number": n, "title": i["title"], "size": size_of(i), "milestone": i["milestone"], "developer": i["assignee"],
+               "blocked_by": blockers, "pr_number": pr["number"] if pr else None,
+               "started": started.date().isoformat() if started else None, "finished": None,
+               "days_taken": None, "days_open": None, "est_days": round(est[size_of(i)], 2)}
+        if n in done:
+            end = pr["merged_at"] if pr and pr["merged"] else i["closed_at"]
+            row.update(status="done", finished=end.date().isoformat(),
+                       days_taken=workdays_between((started or i["created_at"]).date(), end.date(), per_week))
+        else:
+            row["status"] = "blocked" if blockers else ("in_review" if pr and pr.get("state", "open") == "open" else "todo")
+            if started:
+                row["days_open"] = workdays_between(started.date(), today, per_week)
+        out.append(row)
+    return out
+
+
 def compute_milestone_report(data: dict, milestone: dict, today: date, baseline_weight: float | None = None,
                              per_week: int = 5, team_cfg: dict | None = None, idle: str | None = None,
                              baseline_date: date | None = None, size_days: dict | None = None) -> dict:
@@ -191,6 +225,7 @@ def compute_milestone_report(data: dict, milestone: dict, today: date, baseline_
         "done_count": len(issues) - len(open_issues), "open_count": len(open_issues),
         "days_left": days_left, "contributions": risk["parts"],
         "start_date": start.isoformat(), "due_date": end.isoformat(),
+        "work_days_total": planned_days, "work_days_elapsed": elapsed,
         "capacity_person_days": round(team * days_left, 1), "forecast_date": forecast.isoformat(),
         "slip_days": round(slip, 1), "blocked_count": len(blocked_nums), "critical_days": round(crit_len or 0, 1),
         "critical_path": chain or [], "test_days": test_days, "test_days_left": test_left,
@@ -231,7 +266,7 @@ def main():
                 "repo": repo, "milestone": rep["milestone"], "report_date": today.isoformat(),
                 **{k: rep[k] for k in ("pct_done", "pv", "spi", "risk_score", "status", "reasons", "remaining_days_est",
                                        "summary", "total_weight", "done_weight", "planned_weight", "done_count", "open_count",
-                                       "days_left", "contributions", "start_date", "due_date", "capacity_person_days",
+                                       "days_left", "contributions", "start_date", "due_date", "work_days_total", "work_days_elapsed", "capacity_person_days",
                                        "forecast_date", "slip_days", "blocked_count", "critical_days", "critical_path",
                                        "test_days", "test_days_left", "graph")},
                 "findings": rep["findings"],
@@ -255,7 +290,11 @@ def main():
         for w in workload:
             sb.table("workload").upsert({"repo": repo, "report_date": today.isoformat(), **w},
                                         on_conflict="repo,developer,report_date").execute()
-        print(f"{repo}: workload saved for {len(workload)} developer(s)")
+        tasks = compute_dev_tasks(data, names, today, per_week, size_days)
+        if tasks:
+            sb.table("dev_tasks").upsert([{"repo": repo, "report_date": today.isoformat(), **t} for t in tasks],
+                                         on_conflict="repo,report_date,number").execute()
+        print(f"{repo}: workload saved for {len(workload)} developer(s), {len(tasks)} task rows")
 
 
 if __name__ == "__main__":

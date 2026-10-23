@@ -64,6 +64,9 @@ def project_rollup(reports: list, config: dict, today: date, per_week: int = 5) 
     slip = max((r.get("slip_days", 0) for r in reports), default=0)
     out = {"ev_pct": round(ev * 100, 1), "pv_pct": round(pv * 100, 1), "spi": round(ev / pv, 2) if pv > 0 else 1.0,
            "forecast_date": add_workdays(date.fromisoformat(due), slip, per_week).isoformat(), "kloc": config.get("kloc")}
+    pstart = date.fromisoformat(min(m["start"] for m in config["milestones"]))
+    out["work_days_total"] = workdays_between(pstart, date.fromisoformat(due), per_week)
+    out["work_days_elapsed"] = workdays_between(pstart, min(today, date.fromisoformat(due)), per_week) if today > pstart else 0
     budget, team = config.get("budget"), config.get("team") or []
     if budget and team:
         start = date.fromisoformat(min(m["start"] for m in config["milestones"]))
