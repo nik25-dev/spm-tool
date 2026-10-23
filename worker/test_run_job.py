@@ -70,7 +70,7 @@ def test_workload_per_developer():
     d["issues"][5]["assignee"] = "ravi"                                    # one open issue for ravi
     w = {x["developer"]: x for x in run_job.compute_workload(d)}
     assert w["asha"]["done_issues"] == 3 and w["ravi"]["open_issues"] == 1
-    assert w["ravi"]["remaining_days"] == 18.0   # 3 closed M issues took 18 days each -> median replaces the 3-day default
+    assert w["ravi"]["remaining_days"] == 4.5    # 3 merged M PRs took 6 days each: (3*6 + 3*3) / (3+3)
 
 
 def test_untouched_milestone_is_not_flagged_on_day_zero():
@@ -91,3 +91,9 @@ def test_scope_growth_is_measured_against_the_baseline():
 def test_due_dates_are_reported():
     r = run_job.compute_milestone_report(scenario({1}), M, date.today())
     assert r["due_date"] == M["end"] and r["start_date"] == M["start"]
+
+
+def test_estimates_follow_pr_time_not_backlog_time():
+    d = scenario({1, 2, 3, 4, 5, 6})                  # issues sat 20 days in the backlog, but each PR took 6 days
+    est = run_job.estimate_days(d)
+    assert est["M"] == 5.0 and est["S"] == 1.0 and est["L"] == 5.0   # M learned: (6*6 + 3*3) / 9; S and L keep their defaults

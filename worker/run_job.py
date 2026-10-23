@@ -25,15 +25,22 @@ def size_of(issue: dict) -> str:
     return "M"
 
 
-def estimate_days(data: dict, defaults: dict | None = None) -> dict:
-    """Median cycle time (days) per size from ALL issues closed via a merged PR; defaults until 3+ samples."""
-    done = issues_closed_via_merged_pr(data)
-    cycle = {"S": [], "M": [], "L": []}
+def estimate_days(data: dict, defaults: dict | None = None, k: int = 3) -> dict:
+    """Days per task size, learned from how long PRs took (opened -> merged), NOT from how long the issue sat in the
+    backlog. Starts at the team's size_days and moves towards the observed median as tasks finish:
+    estimate = (n * median + k * default) / (n + k)."""
+    merged = {}
+    for p in data["prs"]:
+        if p["merged"] and p["merged_at"]:
+            for n in p["closes"]:
+                merged.setdefault(n, p)
+    lead = {"S": [], "M": [], "L": []}
     for i in data["issues"]:
-        if i["number"] in done and i["closed_at"]:
-            cycle[size_of(i)].append((i["closed_at"] - i["created_at"]).total_seconds() / 86400)
+        p = merged.get(i["number"])
+        if p:
+            lead[size_of(i)].append(max((p["merged_at"] - p["created_at"]).total_seconds() / 86400, 0.0))
     base = {**DEFAULT_DAYS, **(defaults or {})}
-    return {k: (median(v) if len(v) >= 3 else base[k]) for k, v in cycle.items()}
+    return {s: ((len(v) * median(v) + k * base[s]) / (len(v) + k) if v else base[s]) for s, v in lead.items()}
 
 
 def compute_workload(data: dict, size_days: dict | None = None) -> list[dict]:
@@ -99,8 +106,9 @@ def compute_milestone_report(data: dict, milestone: dict, today: date, baseline_
         if conf >= 1.0:
             parts["evm"] = max(0.0, planned_days / max(index, 0.25) - elapsed)  # classic: planned duration / SPI, SPI floored at 0.25
         forecast_days = max(parts.values())
+        driver = max(parts, key=parts.get)
     else:
-        forecast_days = 0.0
+        forecast_days, driver = 0.0, None
     forecast = add_workdays(today, forecast_days, per_week)
     slip = max(0.0, forecast_days - days_left)
     projected_late = clamp01(slip / max(days_left, 1)) if open_issues else 0.0
@@ -160,7 +168,7 @@ def compute_milestone_report(data: dict, milestone: dict, today: date, baseline_
     added = [{"number": n, "title": by_num[n]["title"]} for n in sorted(by_num)
              if baseline_date and by_num[n]["created_at"].date() > baseline_date]
     pub, lead = build_findings({
-        "milestone": milestone["name"], "pv": pv, "head": head, "slip": slip, "forecast": forecast, "due": end,
+        "milestone": milestone["name"], "pv": pv, "driver": driver, "head": head, "slip": slip, "forecast": forecast, "due": end,
         "candidate": cand, "idle": idle if idle and idle != busiest else None,
         "test_days": test_days, "test_left": test_left, "stale": stale, "scope_added": added,
         "scope_pct": max(0.0, (total_w - baseline) / baseline * 100),

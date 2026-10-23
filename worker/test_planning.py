@@ -64,10 +64,10 @@ def test_finished_milestone_has_no_forecast_slip():
 
 
 def test_project_rollup_with_budget():
-    reps = [{"total_weight": 10, "done_weight": 5, "planned_weight": 5, "forecast_date": "2026-11-02"},
-            {"total_weight": 10, "done_weight": 1, "planned_weight": 5, "forecast_date": "2026-11-09"}]
-    cfg = {"kloc": 20, "budget": 100000, "milestones": [{"start": START.isoformat()}],
+    reps = [{"total_weight": 10, "done_weight": 5, "planned_weight": 5, "slip_days": 0.0},
+            {"total_weight": 10, "done_weight": 1, "planned_weight": 5, "slip_days": 5.0}]
+    cfg = {"kloc": 20, "budget": 100000, "project_end": "2026-10-23", "milestones": [{"start": START.isoformat(), "end": "2026-10-23"}],
            "team": [{"github": "a", "daily_rate": 1000}, {"github": "b", "daily_rate": 1000, "availability": 0.5}]}
     out = project_rollup(reps, cfg, date.today(), 7)
-    assert out["ev_pct"] == 30.0 and out["pv_pct"] == 50.0 and out["spi"] == 0.6 and out["forecast_date"] == "2026-11-09"
+    assert out["ev_pct"] == 30.0 and out["pv_pct"] == 50.0 and out["spi"] == 0.6 and out["forecast_date"] == "2026-10-28"
     assert out["ac"] == 1500 * 4 and out["cpi"] == round(30000 / 6000, 2) and out["eac"] == 20000

@@ -59,8 +59,11 @@ def project_rollup(reports: list, config: dict, today: date, per_week: int = 5) 
     total = sum(r["total_weight"] for r in reports) or 1
     ev = sum(r["done_weight"] for r in reports) / total
     pv = sum(r["planned_weight"] for r in reports) / total
+    # a slip in any milestone moves the project end by the same amount (assumes milestones run one after another)
+    due = config.get("project_end") or max(m["end"] for m in config["milestones"])
+    slip = max((r.get("slip_days", 0) for r in reports), default=0)
     out = {"ev_pct": round(ev * 100, 1), "pv_pct": round(pv * 100, 1), "spi": round(ev / pv, 2) if pv > 0 else 1.0,
-           "forecast_date": max(r["forecast_date"] for r in reports), "kloc": config.get("kloc")}
+           "forecast_date": add_workdays(date.fromisoformat(due), slip, per_week).isoformat(), "kloc": config.get("kloc")}
     budget, team = config.get("budget"), config.get("team") or []
     if budget and team:
         start = date.fromisoformat(min(m["start"] for m in config["milestones"]))
@@ -101,7 +104,9 @@ def build_findings(c: dict) -> tuple:
 
     if c.get("slip", 0) > 0:
         late = f"{c['slip']:.0f}" if c["slip"] <= 20 else "more than 20"
-        base = (f"At the current capacity, {c['milestone']} is forecast to finish {c['forecast']:%a %d %b}, "
+        lead_in = {"evm": "At the current pace", "critical": "Because the remaining tasks must be done in order",
+                   "capacity": "With the current team capacity"}.get(c.get("driver"), "At the current pace")
+        base = (f"{lead_in}, {c['milestone']} is forecast to finish {c['forecast']:%a %d %b}, "
                 f"{late} working day(s) after its due date ({c['due']:%a %d %b}).")
         cand, idle = c.get("candidate"), c.get("idle")
         if cand and idle:
